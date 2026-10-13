@@ -1,0 +1,54 @@
+<svg viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4b5563"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="980" height="560" fill="#ffffff"/>
+
+  <!-- Nodes -->
+  <g font-size="14" font-weight="600">
+    <rect x="40" y="40" width="200" height="60" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="140" y="65" text-anchor="middle" fill="#1e3a8a">keyboard_teleop</text>
+    <text x="140" y="83" text-anchor="middle" font-size="11" font-weight="400" fill="#1e3a8a">gait + TF + /joint_states</text>
+
+    <rect x="40" y="240" width="200" height="60" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="140" y="265" text-anchor="middle" fill="#14532d">lidar_simulator</text>
+    <text x="140" y="283" text-anchor="middle" font-size="11" font-weight="400" fill="#14532d">32-beam raycast LiDAR</text>
+
+    <rect x="370" y="240" width="220" height="60" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="480" y="265" text-anchor="middle" fill="#78350f">navigate_to_goal</text>
+    <text x="480" y="283" text-anchor="middle" font-size="11" font-weight="400" fill="#78350f">occupancy grid + A* + control</text>
+
+    <rect x="740" y="40" width="200" height="60" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+    <text x="840" y="65" text-anchor="middle" fill="#4c1d95">RViz2</text>
+    <text x="840" y="83" text-anchor="middle" font-size="11" font-weight="400" fill="#4c1d95">visualization + 2D Nav Goal</text>
+
+    <rect x="370" y="440" width="220" height="60" rx="10" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+    <text x="480" y="465" text-anchor="middle" fill="#7f1d1d">robot_state_publisher</text>
+    <text x="480" y="483" text-anchor="middle" font-size="11" font-weight="400" fill="#7f1d1d">URDF to TF tree</text>
+  </g>
+
+  <!-- Edges -->
+  <g stroke="#4b5563" stroke-width="1.6" fill="none" marker-end="url(#arrow)">
+    <path d="M240,70 L740,70"/>
+    <path d="M140,100 L140,240"/>
+    <path d="M240,270 L370,270"/>
+    <path d="M480,240 L480,100 L740,100"/>
+    <path d="M590,250 L740,250 L840,100"/>
+    <path d="M480,300 L480,440"/>
+    <path d="M330,440 L140,300"/>
+  </g>
+
+  <g font-size="11" fill="#374151">
+    <text x="490" y="60">/joint_states, /tf (odom&#8594;pelvis)</text>
+    <text x="150" y="175" transform="rotate(90 150,175)" text-anchor="middle">/tf (lidar32_link pose)</text>
+    <text x="250" y="263">/lidar_points (PointCloud2)</text>
+    <text x="580" y="150">/nav_occupancy_grid, /planned_path</text>
+    <text x="640" y="200">/goal_pose (2D Nav Goal click)</text>
+    <text x="500" y="370" transform="rotate(90 500,370)" text-anchor="middle">/cmd_vel (Twist)</text>
+    <text x="200" y="390">/robot_description (URDF)</text>
+  </g>
+
+  <text x="490" y="30" text-anchor="middle" font-size="18" font-weight="700" fill="#111827">Unitree G1 Navigation Stack - ROS 2 Node Graph</text>
+</svg>
