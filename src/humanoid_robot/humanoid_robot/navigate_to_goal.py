@@ -53,7 +53,10 @@ BOXES = [
     {'id': 2, 'x': 7.6, 'y': -1.2, 'size': 0.18, 'color': (0.65, 0.25, 0.85), 'state': 'ground'},
 ]
 BOX_SELECT_RADIUS = 0.6    # metres - how close a clicked goal must be to a box to target it
-HAND_FRAME = 'right_wrist_roll_rubber_hand'  # TF frame a carried box tracks
+# A carried box is held between both hands - its displayed position is the
+# midpoint of these two TF frames, not just one hand.
+HAND_FRAME_LEFT = 'left_wrist_roll_rubber_hand'
+HAND_FRAME_RIGHT = 'right_wrist_roll_rubber_hand'
 
 
 def world_to_cell(x, y):
@@ -173,6 +176,7 @@ class NavigateToGoal(Node):
         self.create_subscription(PointCloud2, 'lidar_points', self.on_lidar_points, 5)
         self.create_subscription(PoseStamped, 'goal_pose', self.on_goal_pose, 10)
         self.create_subscription(Bool, 'manipulation_done', self.on_manipulation_done, 10)
+        self.create_subscription(String, 'manipulation_event', self.on_manipulation_event, 10)
 
         self.grid = [[0] * GRID_CELLS for _ in range(GRID_CELLS)]
         self.goal = None           # (x, y) in odom frame
@@ -253,9 +257,20 @@ class NavigateToGoal(Node):
                 best, best_dist = box, d
         return best
 
+    def on_manipulation_event(self, msg):
+        # Fires mid-animation, once the hands actually reach the box (pick)
+        # or the box actually reaches the ground (place) - so the box marker
+        # starts/stops tracking the hands at the right moment, instead of
+        # jumping there only once the robot has fully stood back up.
+        if msg.data == 'grasped' and self.phase == 'picking' and self.target_box is not None:
+            self.target_box['state'] = 'carried'
+        elif msg.data == 'released' and self.phase == 'placing' and self.held_box is not None:
+            self.held_box['x'], self.held_box['y'] = self.goal
+            self.held_box['state'] = 'ground'
+
     def on_manipulation_done(self, msg):
         if self.phase == 'picking' and self.target_box is not None:
-            self.target_box['state'] = 'carried'
+            self.target_box['state'] = 'carried'  # idempotent, in case the event above was missed
             self.held_box = self.target_box
             self.target_box = None
             self.get_logger().info(f"Picked up box {self.held_box['id']}.")
@@ -436,10 +451,15 @@ class NavigateToGoal(Node):
     def get_box_world_position(self, box):
         if box['state'] == 'carried':
             try:
-                tf = self.tf_buffer.lookup_transform(
-                    WORLD_FRAME, HAND_FRAME, rclpy.time.Time(), timeout=Duration(seconds=0.05))
-                t = tf.transform.translation
-                return t.x, t.y, max(0.05, t.z - 0.05)
+                tf_l = self.tf_buffer.lookup_transform(
+                    WORLD_FRAME, HAND_FRAME_LEFT, rclpy.time.Time(), timeout=Duration(seconds=0.05))
+                tf_r = self.tf_buffer.lookup_transform(
+                    WORLD_FRAME, HAND_FRAME_RIGHT, rclpy.time.Time(), timeout=Duration(seconds=0.05))
+                lt, rt = tf_l.transform.translation, tf_r.transform.translation
+                x = (lt.x + rt.x) / 2.0
+                y = (lt.y + rt.y) / 2.0
+                z = (lt.z + rt.z) / 2.0
+                return x, y, max(0.05, z - 0.05)
             except TransformException:
                 pass  # TF not ready yet - fall back to the box's last known position
         return box['x'], box['y'], box['size'] / 2.0

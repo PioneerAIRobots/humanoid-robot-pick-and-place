@@ -134,40 +134,68 @@ WAIST_YAW_COUNTER = 0.06
 PELVIS_BOB_AMPLITUDE = 0.02        # small vertical bob, two bobs per gait cycle
 GAIT_BLEND_RATE = 4.0              # 1/s, how fast the gait fades in/out at start/stop
 
-# --- Pick-and-place arm animation -------------------------------------------
+# --- Pick-and-place full-body animation -------------------------------------
 # Driven by navigate_to_goal over /manipulation_cmd ("pick"/"place") once it
-# walks the robot up to a box or a drop point. Only the right arm is used to
-# carry, so the left arm keeps swinging normally and the walking gait is
-# otherwise untouched. Offsets here are added on top of REST_POSE, same as
-# the gait offsets, and use the same sign convention (shoulder_pitch/elbow
-# negative-forward, see the ARM_REST_PITCH/ELBOW_REST notes above).
-MANIP_DURATION = 2.2  # seconds for one full pick or place animation
+# walks the robot up to a box or a drop point: a real crouch-reach-grasp-rise
+# sequence using both legs (squat), the pelvis height, and both arms - not
+# just an arm wiggle - so it reads as a person bending down to lift something
+# with both hands, not a box teleporting into a static pose. Offsets here are
+# added on top of REST_POSE/the gait, same sign convention as elsewhere
+# (hip_pitch/shoulder_pitch negative-forward, see the notes above).
+PICK_DURATION = 2.6     # seconds for the full crouch -> grasp -> rise sequence
+PLACE_DURATION = 3.0    # a little slower/gentler setting the box down
+SQUAT_HEIGHT_DROP = 0.20  # metres the pelvis sinks during the crouch
+
 MANIP_POSES = {
     'rest': {},
-    'reach': {
-        # arm extended forward and down, as if reaching for something on
-        # the ground just in front of the robot
-        'right_shoulder_pitch_joint': -1.3,
+    'bend': {
+        # both legs squat symmetrically (pelvis height drop is applied
+        # separately, see SQUAT_HEIGHT_DROP) and both arms reach forward
+        # and down, as if about to grab something off the ground
+        'left_hip_pitch_joint': -0.785,
+        'left_knee_joint': 1.22,
+        'left_ankle_pitch_joint': 0.3,
+        'right_hip_pitch_joint': -0.785,
+        'right_knee_joint': 1.22,
+        'right_ankle_pitch_joint': 0.3,
+        'left_shoulder_pitch_joint': -1.2,
+        'left_shoulder_roll_joint': 0.15,
+        'left_elbow_joint': 0.3,
+        'right_shoulder_pitch_joint': -1.2,
         'right_shoulder_roll_joint': -0.15,
         'right_elbow_joint': 0.3,
     },
     'carry': {
-        # elbow bent, holding the box against the chest
+        # standing tall again, both elbows bent, holding the box against
+        # the chest with both hands - legs/pelvis back to neutral so normal
+        # walking resumes cleanly once this is the held pose
+        'left_shoulder_pitch_joint': -0.9,
+        'left_shoulder_roll_joint': 0.3,
+        'left_elbow_joint': 1.6,
         'right_shoulder_pitch_joint': -0.9,
         'right_shoulder_roll_joint': -0.3,
         'right_elbow_joint': 1.6,
     },
 }
-# (fraction of animation, pose name). A short hold at the reach pose stands
-# in for the grasp/release moment.
-PICK_TIMELINE = [(0.0, 'rest'), (0.5, 'reach'), (0.65, 'reach'), (1.0, 'carry')]
-PLACE_TIMELINE = [(0.0, 'carry'), (0.4, 'reach'), (0.6, 'reach'), (1.0, 'rest')]
+MANIP_HEIGHT_DELTA = {'rest': 0.0, 'bend': -SQUAT_HEIGHT_DROP, 'carry': 0.0}
+
+# (fraction of animation, pose name). The hold at 'bend' stands in for the
+# grasp/release moment - GRASP_FRACTION/RELEASE_FRACTION below mark the
+# instant within that hold where the box actually changes hands, so it moves
+# with the robot's hands through the crouch and the stand-back-up, not just
+# at the very start/end of the whole animation.
+PICK_TIMELINE = [(0.0, 'rest'), (0.35, 'bend'), (0.55, 'bend'), (1.0, 'carry')]
+PLACE_TIMELINE = [(0.0, 'carry'), (0.25, 'bend'), (0.45, 'bend'), (1.0, 'rest')]
+GRASP_FRACTION = 0.55    # within PICK_TIMELINE: box leaves the ground, into both hands
+RELEASE_FRACTION = 0.45  # within PLACE_TIMELINE: box leaves both hands, onto the ground
 
 
 def _blend_manip_poses(name_a, name_b, f):
     a, b = MANIP_POSES[name_a], MANIP_POSES[name_b]
     ease = 0.5 - 0.5 * math.cos(math.pi * f)
-    return {n: a.get(n, 0.0) + (b.get(n, 0.0) - a.get(n, 0.0)) * ease for n in set(a) | set(b)}
+    joints = {n: a.get(n, 0.0) + (b.get(n, 0.0) - a.get(n, 0.0)) * ease for n in set(a) | set(b)}
+    height = MANIP_HEIGHT_DELTA[name_a] + (MANIP_HEIGHT_DELTA[name_b] - MANIP_HEIGHT_DELTA[name_a]) * ease
+    return joints, height
 
 
 def _manip_timeline_lookup(timeline, progress):
@@ -178,7 +206,8 @@ def _manip_timeline_lookup(timeline, progress):
         if t0 <= progress <= t1:
             f = (progress - t0) / (t1 - t0) if t1 > t0 else 0.0
             return _blend_manip_poses(p0, p1, f)
-    return dict(MANIP_POSES[timeline[-1][1]])
+    name = timeline[-1][1]
+    return dict(MANIP_POSES[name]), MANIP_HEIGHT_DELTA[name]
 
 
 def _gait_keyframe_lookup(frac):
@@ -271,15 +300,17 @@ class HumanoidTeleop(Node):
         self.cmd_vel_sub = self.create_subscription(
             Twist, 'cmd_vel', self.on_cmd_vel, 10)
 
-        # Pick-and-place arm animation state.
+        # Pick-and-place full-body animation state.
         self.manip_action = None       # None | 'pick' | 'place' - animation in progress
         self.manip_elapsed = 0.0
         self.manip_done_sent = True
+        self.manip_event_sent = True   # grasp/release event already fired for this action
         self.manip_hold_pose = 'rest'  # pose held once an animation finishes
-        self.holding_box = False       # suppresses the right arm's gait swing while True
+        self.holding_box = False       # suppresses the gait's arm swing while True
         self.manip_cmd_sub = self.create_subscription(
             String, 'manipulation_cmd', self.on_manipulation_cmd, 10)
         self.manip_done_pub = self.create_publisher(Bool, 'manipulation_done', 10)
+        self.manip_event_pub = self.create_publisher(String, 'manipulation_event', 10)
 
         self.last_time = self.get_clock().now()
         self.timer = self.create_timer(0.02, self.timer_callback)
@@ -323,6 +354,7 @@ class HumanoidTeleop(Node):
         self.manip_action = msg.data
         self.manip_elapsed = 0.0
         self.manip_done_sent = False
+        self.manip_event_sent = False
 
     def select_joint(self, key):
         if key == '[':
@@ -353,10 +385,11 @@ class HumanoidTeleop(Node):
 
         self.integrate_base(dt)
         offsets, pelvis_bob = self.step_gait(dt)
-        for name, value in self.compute_manip_offsets(dt).items():
+        manip_offsets, manip_height_delta = self.compute_manip_offsets(dt)
+        for name, value in manip_offsets.items():
             offsets[name] = offsets.get(name, 0.0) + value
 
-        self.publish_tf(pelvis_bob)
+        self.publish_tf(pelvis_bob, manip_height_delta)
         self.publish_joint_states(offsets)
 
     def integrate_base(self, dt):
@@ -414,15 +447,19 @@ class HumanoidTeleop(Node):
         # the waist, the way a person naturally balances while walking.
         # (Negated for the same reason as hip_pitch above - this shoulder
         # joint's positive direction is also anatomically backward.)
-        offsets['left_shoulder_pitch_joint'] = -ARM_SWING * math.sin(right_phase) * scale
-        offsets['left_elbow_joint'] = ELBOW_BASE_BEND * scale
-        # The right arm is reserved for carrying while a pick/place animation
-        # is running or a box is held - the manipulation pose (added in
-        # timer_callback) would otherwise fight the gait's counter-swing.
-        if self.manip_action is None and not self.holding_box:
+        # Both arms are reserved for carrying while a pick/place animation is
+        # running or a box is held in both hands - the manipulation pose
+        # (added in timer_callback) would otherwise fight the gait's
+        # counter-swing on top of it.
+        manipulating = self.manip_action is not None or self.holding_box
+        if not manipulating:
+            offsets['left_shoulder_pitch_joint'] = -ARM_SWING * math.sin(right_phase) * scale
+            offsets['left_elbow_joint'] = ELBOW_BASE_BEND * scale
             offsets['right_shoulder_pitch_joint'] = -ARM_SWING * math.sin(left_phase) * scale
             offsets['right_elbow_joint'] = ELBOW_BASE_BEND * scale
         else:
+            offsets['left_shoulder_pitch_joint'] = 0.0
+            offsets['left_elbow_joint'] = 0.0
             offsets['right_shoulder_pitch_joint'] = 0.0
             offsets['right_elbow_joint'] = 0.0
         offsets['waist_yaw_joint'] = WAIST_YAW_COUNTER * math.sin(left_phase) * scale
@@ -431,35 +468,45 @@ class HumanoidTeleop(Node):
         return offsets, pelvis_bob
 
     def compute_manip_offsets(self, dt):
-        """Right-arm pick/place animation. Runs once per /manipulation_cmd,
-        then holds its end pose (carrying, or back at rest) until the next
-        command, independent of the walking gait above."""
+        """Full-body pick/place animation: crouch (both legs + pelvis height)
+        -> reach with both arms -> grasp/release -> stand back up. Runs once
+        per /manipulation_cmd, then holds its end pose (carrying, or back at
+        rest - both standing tall, legs neutral) until the next command,
+        independent of the walking gait above."""
         if self.manip_action is not None:
             self.manip_elapsed += dt
-            progress = min(1.0, self.manip_elapsed / MANIP_DURATION)
+            duration = PICK_DURATION if self.manip_action == 'pick' else PLACE_DURATION
+            progress = min(1.0, self.manip_elapsed / duration)
             timeline = PICK_TIMELINE if self.manip_action == 'pick' else PLACE_TIMELINE
-            offsets = _manip_timeline_lookup(timeline, progress)
+            offsets, height_delta = _manip_timeline_lookup(timeline, progress)
+
+            event_fraction = GRASP_FRACTION if self.manip_action == 'pick' else RELEASE_FRACTION
+            if progress >= event_fraction and not self.manip_event_sent:
+                self.manip_event_sent = True
+                event = 'grasped' if self.manip_action == 'pick' else 'released'
+                self.manip_event_pub.publish(String(data=event))
+
             if progress >= 1.0 and not self.manip_done_sent:
                 self.manip_done_sent = True
                 self.holding_box = (self.manip_action == 'pick')
                 self.manip_hold_pose = 'carry' if self.manip_action == 'pick' else 'rest'
                 self.manip_action = None
                 self.manip_done_pub.publish(Bool(data=True))
-            return offsets
+            return offsets, height_delta
         if self.manip_hold_pose == 'carry':
-            return dict(MANIP_POSES['carry'])
-        return {}
+            return dict(MANIP_POSES['carry']), 0.0
+        return {}, 0.0
 
     # --- publishing ----------------------------------------------------------
 
-    def publish_tf(self, pelvis_bob):
+    def publish_tf(self, pelvis_bob, manip_height_delta=0.0):
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = 'odom'
         t.child_frame_id = BASE_FRAME
         t.transform.translation.x = self.x
         t.transform.translation.y = self.y
-        t.transform.translation.z = self.base_height + pelvis_bob
+        t.transform.translation.z = max(0.3, self.base_height + pelvis_bob + manip_height_delta)
         t.transform.rotation.z = math.sin(self.yaw / 2.0)
         t.transform.rotation.w = math.cos(self.yaw / 2.0)
         self.tf_broadcaster.sendTransform(t)
