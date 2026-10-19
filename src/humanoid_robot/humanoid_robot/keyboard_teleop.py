@@ -142,34 +142,40 @@ GAIT_BLEND_RATE = 4.0              # 1/s, how fast the gait fades in/out at star
 # with both hands, not a box teleporting into a static pose. Offsets here are
 # added on top of REST_POSE/the gait, same sign convention as elsewhere
 # (hip_pitch/shoulder_pitch negative-forward, see the notes above).
-PICK_DURATION = 2.6     # seconds for the full crouch -> grasp -> rise sequence
-PLACE_DURATION = 3.0    # a little slower/gentler setting the box down
-SQUAT_HEIGHT_DROP = 0.20  # metres the pelvis sinks during the crouch
+PICK_DURATION = 2.8     # seconds for the full crouch -> grasp -> rise sequence
+PLACE_DURATION = 3.2    # a little slower/gentler setting the box down
+# Metres the pelvis sinks during the crouch - a deep squat (knee/hip angles
+# below are picked to match: at these leg joint limits the foot stays almost
+# exactly planted, verified by FK, for this much pelvis drop) because this
+# URDF has no waist/torso pitch joint to lean forward with - squatting the
+# legs is the only way to bring the shoulders down toward the ground at all.
+SQUAT_HEIGHT_DROP = 0.50
 
 MANIP_POSES = {
     'rest': {},
     'bend': {
-        # Both legs squat symmetrically (pelvis height drop is applied
-        # separately, see SQUAT_HEIGHT_DROP) to bring the whole body down to
-        # the box. The arms stay close to their natural hang rather than
-        # swinging forward: shoulder_pitch pivots the arm on an arc centred
-        # on the shoulder, and hanging straight down is already the LOWEST
-        # point that arc reaches - a big forward swing (as this used to be)
-        # raises the hand toward shoulder height instead of lowering it, the
-        # opposite of reaching down. A small forward lean plus the squat is
-        # what actually brings the hands down to the box.
-        'left_hip_pitch_joint': -0.785,
-        'left_knee_joint': 1.22,
-        'left_ankle_pitch_joint': 0.3,
-        'right_hip_pitch_joint': -0.785,
-        'right_knee_joint': 1.22,
-        'right_ankle_pitch_joint': 0.3,
-        'left_shoulder_pitch_joint': -0.35,
+        # Both legs squat deeply and symmetrically (pelvis height drop is
+        # applied separately, see SQUAT_HEIGHT_DROP) - with no waist pitch
+        # joint on this URDF, this is the only way to bring the shoulders
+        # down near the ground. The arms stay close to a natural hang rather
+        # than swinging the shoulder forward (shoulder_pitch pivots the arm
+        # on an arc centred on the shoulder, and hanging straight down is
+        # already the lowest point that arc reaches - swinging it forward
+        # only raises the hand). The elbow bend below isn't "straighten the
+        # arm to reach further" either - a full sweep of the joint's FK found
+        # the true lowest-reaching elbow angle is this bent, not straight.
+        'left_hip_pitch_joint': -1.327,
+        'left_knee_joint': 2.653,
+        'left_ankle_pitch_joint': 0.464,
+        'right_hip_pitch_joint': -1.327,
+        'right_knee_joint': 2.653,
+        'right_ankle_pitch_joint': 0.464,
+        'left_shoulder_pitch_joint': 0.0,
         'left_shoulder_roll_joint': 0.1,
-        'left_elbow_joint': 0.0,
-        'right_shoulder_pitch_joint': -0.35,
+        'left_elbow_joint': 2.39,
+        'right_shoulder_pitch_joint': 0.0,
         'right_shoulder_roll_joint': -0.1,
-        'right_elbow_joint': 0.0,
+        'right_elbow_joint': 2.39,
     },
     'carry': {
         # standing tall again, both elbows bent, holding the box against
