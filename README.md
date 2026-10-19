@@ -33,6 +33,10 @@ re-planning on the fly as it discovers obstacles.
   periodically.
 - **Keyboard teleop fallback** — drive the robot manually at any time;
   manual input always takes priority back from the navigation node.
+- **Pick-and-place** — a few boxes sit in the scene; send a goal near one and
+  the robot navigates to it (avoiding obstacles the whole way), plays a
+  reach/carry arm animation to pick it up, then a second goal anywhere else
+  walks it there and sets the box down.
 
 ## How it works
 
@@ -123,6 +127,16 @@ Then in RViz:
 3. Watch the robot plan a path around the zig-zag obstacles and walk itself
    there. You can retake manual control at any time from the teleop terminal.
 
+### Pick-and-place
+
+1. With the robot not already carrying a box, click **2D Nav Goal** near one
+   of the three boxes in the scene — it walks there (around any obstacles in
+   the way), then plays a reach-and-carry animation and picks it up.
+2. Click **2D Nav Goal** anywhere else — it walks there carrying the box,
+   then plays a lower-and-release animation and sets the box down.
+3. Repeat: the box (now sitting at the new spot) can be picked up again the
+   same way.
+
 ## Topics
 
 | Topic | Type | Description |
@@ -135,6 +149,9 @@ Then in RViz:
 | `/nav_occupancy_grid` | `nav_msgs/OccupancyGrid` | Grid built from LiDAR, inflated by robot radius |
 | `/planned_path` | `nav_msgs/Path` | Simplified A* path |
 | `/cmd_vel` | `geometry_msgs/Twist` | Drives the walking gait (keyboard or navigation) |
+| `/box_markers` | `visualization_msgs/MarkerArray` | The pickable boxes (tracks the hand frame while carried) |
+| `/manipulation_cmd` | `std_msgs/String` | `"pick"` / `"place"` — starts the arm animation |
+| `/manipulation_done` | `std_msgs/Bool` | Published once an arm animation finishes |
 
 ## License
 

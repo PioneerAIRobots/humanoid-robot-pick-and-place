@@ -8,8 +8,9 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from geometry_msgs.msg import PoseStamped, Twist, Point
 from nav_msgs.msg import Path, OccupancyGrid
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String, Bool
 from tf2_ros import Buffer, TransformListener, TransformException
+from visualization_msgs.msg import Marker, MarkerArray
 
 WORLD_FRAME = 'odom'
 ROBOT_FRAME = 'pelvis'
@@ -38,6 +39,21 @@ TURN_IN_PLACE_THRESHOLD = 0.6   # radians - heading error above this: stop and t
 HEADING_KP = 1.2
 REPLAN_PERIOD = 2.0             # seconds between replans while navigating
 CONTROL_PERIOD = 0.1            # seconds between control-loop ticks
+
+# --- Pick-and-place ----------------------------------------------------------
+# Static pickable boxes, in the odom frame. Clicking a "2D Nav Goal" near one
+# of these (while not already carrying a box) sends the robot to pick it up
+# instead of just walking there; clicking anywhere else while carrying sends
+# the robot to walk there and set the box down. Positions are chosen clear of
+# the zig-zag obstacle course in lidar_simulator.py so pick/place and
+# obstacle-avoidance can be demoed together.
+BOXES = [
+    {'id': 0, 'x': 1.0, 'y': 1.3, 'size': 0.18, 'color': (0.95, 0.75, 0.1), 'state': 'ground'},
+    {'id': 1, 'x': 4.8, 'y': 1.4, 'size': 0.18, 'color': (0.2, 0.7, 0.95), 'state': 'ground'},
+    {'id': 2, 'x': 7.6, 'y': -1.2, 'size': 0.18, 'color': (0.65, 0.25, 0.85), 'state': 'ground'},
+]
+BOX_SELECT_RADIUS = 0.6    # metres - how close a clicked goal must be to a box to target it
+HAND_FRAME = 'right_wrist_roll_rubber_hand'  # TF frame a carried box tracks
 
 
 def world_to_cell(x, y):
@@ -151,19 +167,30 @@ class NavigateToGoal(Node):
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.path_pub = self.create_publisher(Path, 'planned_path', 1)
         self.grid_pub = self.create_publisher(OccupancyGrid, 'nav_occupancy_grid', 1)
+        self.manip_cmd_pub = self.create_publisher(String, 'manipulation_cmd', 10)
+        self.box_marker_pub = self.create_publisher(MarkerArray, 'box_markers', 1)
 
         self.create_subscription(PointCloud2, 'lidar_points', self.on_lidar_points, 5)
         self.create_subscription(PoseStamped, 'goal_pose', self.on_goal_pose, 10)
+        self.create_subscription(Bool, 'manipulation_done', self.on_manipulation_done, 10)
 
         self.grid = [[0] * GRID_CELLS for _ in range(GRID_CELLS)]
         self.goal = None           # (x, y) in odom frame
         self.waypoints = []        # remaining path waypoints, [0] is the current target
         self.last_plan_time = None
 
+        # Pick-and-place state. phase: 'idle' | 'navigating' | 'picking' | 'placing'.
+        self.phase = 'idle'
+        self.boxes = BOXES
+        self.held_box = None       # box dict currently carried, or None
+        self.target_box = None     # box dict being walked towards for a pick, or None
+
         self.create_timer(CONTROL_PERIOD, self.control_tick)
+        self.create_timer(0.2, self.publish_boxes)
         self.get_logger().info(
             'navigate_to_goal ready - send a goal on /goal_pose '
-            '(e.g. RViz "2D Nav Goal") to start navigating.')
+            '(e.g. RViz "2D Nav Goal"). A goal near a box picks it up; a '
+            'goal anywhere else while carrying a box sets it down there.')
 
     # --- sensing -------------------------------------------------------------
 
@@ -194,9 +221,53 @@ class NavigateToGoal(Node):
             self.get_logger().warn(
                 f'Ignoring goal in frame "{msg.header.frame_id}" - expected "{WORLD_FRAME}".')
             return
-        self.goal = (msg.pose.position.x, msg.pose.position.y)
-        self.get_logger().info(f'New goal: ({self.goal[0]:.2f}, {self.goal[1]:.2f})')
+        if self.phase in ('picking', 'placing'):
+            self.get_logger().warn('Busy picking/placing - ignoring new goal.')
+            return
+
+        gx, gy = msg.pose.position.x, msg.pose.position.y
+        if self.held_box is None:
+            box = self.find_nearby_box(gx, gy)
+            self.target_box = box
+            if box is not None:
+                self.goal = (box['x'], box['y'])
+                self.get_logger().info(f"Pick goal: box {box['id']} at ({box['x']:.2f}, {box['y']:.2f})")
+            else:
+                self.goal = (gx, gy)
+                self.get_logger().info(f'New goal: ({gx:.2f}, {gy:.2f})')
+        else:
+            self.target_box = None
+            self.goal = (gx, gy)
+            self.get_logger().info(f'Place goal: ({gx:.2f}, {gy:.2f})')
+
+        self.phase = 'navigating'
         self.replan()
+
+    def find_nearby_box(self, gx, gy):
+        best, best_dist = None, BOX_SELECT_RADIUS
+        for box in self.boxes:
+            if box['state'] != 'ground':
+                continue
+            d = math.hypot(box['x'] - gx, box['y'] - gy)
+            if d <= best_dist:
+                best, best_dist = box, d
+        return best
+
+    def on_manipulation_done(self, msg):
+        if self.phase == 'picking' and self.target_box is not None:
+            self.target_box['state'] = 'carried'
+            self.held_box = self.target_box
+            self.target_box = None
+            self.get_logger().info(f"Picked up box {self.held_box['id']}.")
+        elif self.phase == 'placing' and self.held_box is not None:
+            self.held_box['x'], self.held_box['y'] = self.goal
+            self.held_box['state'] = 'ground'
+            self.get_logger().info(
+                f"Placed box {self.held_box['id']} at ({self.goal[0]:.2f}, {self.goal[1]:.2f}).")
+            self.held_box = None
+        self.phase = 'idle'
+        self.goal = None
+        self.waypoints = []
 
     # --- planning --------------------------------------------------------------
 
@@ -240,7 +311,7 @@ class NavigateToGoal(Node):
     # --- control ---------------------------------------------------------------
 
     def control_tick(self):
-        if self.goal is None:
+        if self.phase != 'navigating' or self.goal is None:
             return
 
         now = self.get_clock().now()
@@ -256,7 +327,8 @@ class NavigateToGoal(Node):
         if not self.waypoints:
             dist_to_goal = math.hypot(self.goal[0] - x, self.goal[1] - y)
             if dist_to_goal <= GOAL_TOLERANCE:
-                return  # already there, nothing to do
+                self.handle_arrival()
+                return
             self.publish_cmd(0.0, 0.0, 0.0)
             return
 
@@ -266,8 +338,7 @@ class NavigateToGoal(Node):
         if dist <= tolerance:
             self.waypoints.pop(0)
             if not self.waypoints:
-                self.get_logger().info('Goal reached.')
-                self.publish_cmd(0.0, 0.0, 0.0)
+                self.handle_arrival()
                 return
             target = self.waypoints[0]
             dist = math.hypot(target[0] - x, target[1] - y)
@@ -285,6 +356,20 @@ class NavigateToGoal(Node):
             vx = max(vx, 0.0)
 
         self.publish_cmd(vx, 0.0, wz)
+
+    def handle_arrival(self):
+        self.get_logger().info('Goal reached.')
+        self.publish_cmd(0.0, 0.0, 0.0)
+        if self.held_box is None and self.target_box is not None:
+            self.phase = 'picking'
+            self.manip_cmd_pub.publish(String(data='pick'))
+        elif self.held_box is not None:
+            self.phase = 'placing'
+            self.manip_cmd_pub.publish(String(data='place'))
+        else:
+            self.phase = 'idle'
+            self.goal = None
+            self.waypoints = []
 
     def publish_cmd(self, vx, vy, wz):
         msg = Twist()
@@ -326,6 +411,38 @@ class NavigateToGoal(Node):
                     data[base + cx] = 100
         msg.data = data
         self.grid_pub.publish(msg)
+
+    def publish_boxes(self):
+        array = MarkerArray()
+        for box in self.boxes:
+            x, y, z = self.get_box_world_position(box)
+            marker = Marker()
+            marker.header.frame_id = WORLD_FRAME
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = 'boxes'
+            marker.id = box['id']
+            marker.type = Marker.CUBE
+            marker.action = Marker.ADD
+            marker.pose.position.x = x
+            marker.pose.position.y = y
+            marker.pose.position.z = z
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = marker.scale.y = marker.scale.z = box['size']
+            r, g, b = box['color']
+            marker.color.r, marker.color.g, marker.color.b, marker.color.a = r, g, b, 0.95
+            array.markers.append(marker)
+        self.box_marker_pub.publish(array)
+
+    def get_box_world_position(self, box):
+        if box['state'] == 'carried':
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    WORLD_FRAME, HAND_FRAME, rclpy.time.Time(), timeout=Duration(seconds=0.05))
+                t = tf.transform.translation
+                return t.x, t.y, max(0.05, t.z - 0.05)
+            except TransformException:
+                pass  # TF not ready yet - fall back to the box's last known position
+        return box['x'], box['y'], box['size'] / 2.0
 
 
 def main(args=None):

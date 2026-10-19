@@ -8,6 +8,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import TransformStamped, Twist
+from std_msgs.msg import String, Bool
 from tf2_ros import TransformBroadcaster
 
 # Unitree G1 (23-DOF) actuated joints, in the order defined by g1_23dof.urdf.
@@ -133,6 +134,52 @@ WAIST_YAW_COUNTER = 0.06
 PELVIS_BOB_AMPLITUDE = 0.02        # small vertical bob, two bobs per gait cycle
 GAIT_BLEND_RATE = 4.0              # 1/s, how fast the gait fades in/out at start/stop
 
+# --- Pick-and-place arm animation -------------------------------------------
+# Driven by navigate_to_goal over /manipulation_cmd ("pick"/"place") once it
+# walks the robot up to a box or a drop point. Only the right arm is used to
+# carry, so the left arm keeps swinging normally and the walking gait is
+# otherwise untouched. Offsets here are added on top of REST_POSE, same as
+# the gait offsets, and use the same sign convention (shoulder_pitch/elbow
+# negative-forward, see the ARM_REST_PITCH/ELBOW_REST notes above).
+MANIP_DURATION = 2.2  # seconds for one full pick or place animation
+MANIP_POSES = {
+    'rest': {},
+    'reach': {
+        # arm extended forward and down, as if reaching for something on
+        # the ground just in front of the robot
+        'right_shoulder_pitch_joint': -1.3,
+        'right_shoulder_roll_joint': -0.15,
+        'right_elbow_joint': 0.3,
+    },
+    'carry': {
+        # elbow bent, holding the box against the chest
+        'right_shoulder_pitch_joint': -0.9,
+        'right_shoulder_roll_joint': -0.3,
+        'right_elbow_joint': 1.6,
+    },
+}
+# (fraction of animation, pose name). A short hold at the reach pose stands
+# in for the grasp/release moment.
+PICK_TIMELINE = [(0.0, 'rest'), (0.5, 'reach'), (0.65, 'reach'), (1.0, 'carry')]
+PLACE_TIMELINE = [(0.0, 'carry'), (0.4, 'reach'), (0.6, 'reach'), (1.0, 'rest')]
+
+
+def _blend_manip_poses(name_a, name_b, f):
+    a, b = MANIP_POSES[name_a], MANIP_POSES[name_b]
+    ease = 0.5 - 0.5 * math.cos(math.pi * f)
+    return {n: a.get(n, 0.0) + (b.get(n, 0.0) - a.get(n, 0.0)) * ease for n in set(a) | set(b)}
+
+
+def _manip_timeline_lookup(timeline, progress):
+    progress = max(0.0, min(1.0, progress))
+    for i in range(len(timeline) - 1):
+        t0, p0 = timeline[i]
+        t1, p1 = timeline[i + 1]
+        if t0 <= progress <= t1:
+            f = (progress - t0) / (t1 - t0) if t1 > t0 else 0.0
+            return _blend_manip_poses(p0, p1, f)
+    return dict(MANIP_POSES[timeline[-1][1]])
+
 
 def _gait_keyframe_lookup(frac):
     """Interpolate (hip, knee, ankle) radians at a 0..1 fraction of the gait
@@ -171,6 +218,10 @@ navigate_to_goal node and send it a goal (RViz "2D Nav Goal" tool, or publish
 geometry_msgs/PoseStamped on /goal_pose) and it will walk itself there,
 planning a path around obstacles seen by the LiDAR. Pressing any movement key
 here takes manual control back at any time.
+
+Pick-and-place: this node also plays a right-arm reach/carry animation on
+/manipulation_cmd ("pick"/"place"), driven automatically by navigate_to_goal
+when it walks the robot up to a box or a drop point.
 
 CTRL-C to quit
 -------------------------------------------------
@@ -220,6 +271,16 @@ class HumanoidTeleop(Node):
         self.cmd_vel_sub = self.create_subscription(
             Twist, 'cmd_vel', self.on_cmd_vel, 10)
 
+        # Pick-and-place arm animation state.
+        self.manip_action = None       # None | 'pick' | 'place' - animation in progress
+        self.manip_elapsed = 0.0
+        self.manip_done_sent = True
+        self.manip_hold_pose = 'rest'  # pose held once an animation finishes
+        self.holding_box = False       # suppresses the right arm's gait swing while True
+        self.manip_cmd_sub = self.create_subscription(
+            String, 'manipulation_cmd', self.on_manipulation_cmd, 10)
+        self.manip_done_pub = self.create_publisher(Bool, 'manipulation_done', 10)
+
         self.last_time = self.get_clock().now()
         self.timer = self.create_timer(0.02, self.timer_callback)
 
@@ -256,6 +317,13 @@ class HumanoidTeleop(Node):
         self.vy = msg.linear.y
         self.wz = msg.angular.z
 
+    def on_manipulation_cmd(self, msg):
+        if msg.data not in ('pick', 'place'):
+            return
+        self.manip_action = msg.data
+        self.manip_elapsed = 0.0
+        self.manip_done_sent = False
+
     def select_joint(self, key):
         if key == '[':
             self.selected_index = (self.selected_index - 1) % len(JOINT_NAMES)
@@ -285,6 +353,8 @@ class HumanoidTeleop(Node):
 
         self.integrate_base(dt)
         offsets, pelvis_bob = self.step_gait(dt)
+        for name, value in self.compute_manip_offsets(dt).items():
+            offsets[name] = offsets.get(name, 0.0) + value
 
         self.publish_tf(pelvis_bob)
         self.publish_joint_states(offsets)
@@ -345,13 +415,40 @@ class HumanoidTeleop(Node):
         # (Negated for the same reason as hip_pitch above - this shoulder
         # joint's positive direction is also anatomically backward.)
         offsets['left_shoulder_pitch_joint'] = -ARM_SWING * math.sin(right_phase) * scale
-        offsets['right_shoulder_pitch_joint'] = -ARM_SWING * math.sin(left_phase) * scale
         offsets['left_elbow_joint'] = ELBOW_BASE_BEND * scale
-        offsets['right_elbow_joint'] = ELBOW_BASE_BEND * scale
+        # The right arm is reserved for carrying while a pick/place animation
+        # is running or a box is held - the manipulation pose (added in
+        # timer_callback) would otherwise fight the gait's counter-swing.
+        if self.manip_action is None and not self.holding_box:
+            offsets['right_shoulder_pitch_joint'] = -ARM_SWING * math.sin(left_phase) * scale
+            offsets['right_elbow_joint'] = ELBOW_BASE_BEND * scale
+        else:
+            offsets['right_shoulder_pitch_joint'] = 0.0
+            offsets['right_elbow_joint'] = 0.0
         offsets['waist_yaw_joint'] = WAIST_YAW_COUNTER * math.sin(left_phase) * scale
 
         pelvis_bob = PELVIS_BOB_AMPLITUDE * abs(math.sin(phase)) * scale
         return offsets, pelvis_bob
+
+    def compute_manip_offsets(self, dt):
+        """Right-arm pick/place animation. Runs once per /manipulation_cmd,
+        then holds its end pose (carrying, or back at rest) until the next
+        command, independent of the walking gait above."""
+        if self.manip_action is not None:
+            self.manip_elapsed += dt
+            progress = min(1.0, self.manip_elapsed / MANIP_DURATION)
+            timeline = PICK_TIMELINE if self.manip_action == 'pick' else PLACE_TIMELINE
+            offsets = _manip_timeline_lookup(timeline, progress)
+            if progress >= 1.0 and not self.manip_done_sent:
+                self.manip_done_sent = True
+                self.holding_box = (self.manip_action == 'pick')
+                self.manip_hold_pose = 'carry' if self.manip_action == 'pick' else 'rest'
+                self.manip_action = None
+                self.manip_done_pub.publish(Bool(data=True))
+            return offsets
+        if self.manip_hold_pose == 'carry':
+            return dict(MANIP_POSES['carry'])
+        return {}
 
     # --- publishing ----------------------------------------------------------
 
