@@ -1,17 +1,20 @@
 # Unitree G1 Humanoid — ROS 2 Navigation & Gait Simulation
 
-![Demo](docs/images/humanoid_demo.gif)
+![Demo](docs/images/pickplace_demo.gif)
 
 A ROS 2 Humble simulation of a **Unitree G1 23-DOF humanoid** that walks with a
 biomechanically-tuned gait, senses its surroundings with a simulated 32-beam
-LiDAR, and autonomously **navigates to a goal point while avoiding obstacles**
-— all visualized live in RViz2, no physics engine required.
+LiDAR, autonomously **navigates to a goal point while avoiding obstacles**, and
+**picks up and places boxes** with a real crouch-and-reach motion — all
+visualized live in RViz2, no physics engine required.
 
 Give it a goal in RViz ("2D Nav Goal") and the robot plans a path through an
 occupancy grid built from LiDAR data, simplifies it, and walks itself there,
-re-planning on the fly as it discovers obstacles.
+re-planning on the fly as it discovers obstacles. Aim a goal at one of the
+boxes in the scene instead, and it walks over, crouches down, picks it up,
+then carries it to wherever you send it next.
 
-[▶ Full video](humanoid.mp4) · node/topic graph below
+[▶ Pick-and-place video](pick.mp4) · [▶ Navigation video](humanoid.mp4) · node/topic graph below
 
 ![Node graph](docs/images/architecture.svg)
 
