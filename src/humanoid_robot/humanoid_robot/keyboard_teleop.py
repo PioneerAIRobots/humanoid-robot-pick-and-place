@@ -149,21 +149,27 @@ SQUAT_HEIGHT_DROP = 0.20  # metres the pelvis sinks during the crouch
 MANIP_POSES = {
     'rest': {},
     'bend': {
-        # both legs squat symmetrically (pelvis height drop is applied
-        # separately, see SQUAT_HEIGHT_DROP) and both arms reach forward
-        # and down, as if about to grab something off the ground
+        # Both legs squat symmetrically (pelvis height drop is applied
+        # separately, see SQUAT_HEIGHT_DROP) to bring the whole body down to
+        # the box. The arms stay close to their natural hang rather than
+        # swinging forward: shoulder_pitch pivots the arm on an arc centred
+        # on the shoulder, and hanging straight down is already the LOWEST
+        # point that arc reaches - a big forward swing (as this used to be)
+        # raises the hand toward shoulder height instead of lowering it, the
+        # opposite of reaching down. A small forward lean plus the squat is
+        # what actually brings the hands down to the box.
         'left_hip_pitch_joint': -0.785,
         'left_knee_joint': 1.22,
         'left_ankle_pitch_joint': 0.3,
         'right_hip_pitch_joint': -0.785,
         'right_knee_joint': 1.22,
         'right_ankle_pitch_joint': 0.3,
-        'left_shoulder_pitch_joint': -1.2,
-        'left_shoulder_roll_joint': 0.15,
-        'left_elbow_joint': 0.3,
-        'right_shoulder_pitch_joint': -1.2,
-        'right_shoulder_roll_joint': -0.15,
-        'right_elbow_joint': 0.3,
+        'left_shoulder_pitch_joint': -0.35,
+        'left_shoulder_roll_joint': 0.1,
+        'left_elbow_joint': 0.0,
+        'right_shoulder_pitch_joint': -0.35,
+        'right_shoulder_roll_joint': -0.1,
+        'right_elbow_joint': 0.0,
     },
     'carry': {
         # standing tall again, both elbows bent, holding the box against
